@@ -325,7 +325,18 @@ function wpwire_tool_page() {
     $zipUploads = isset($_GET['zip_uploads']);
     $zipThemes = isset($_GET['zip_themes']);
     $zipPlugins = isset($_GET['zip_plugins']);
-
+    $pluginDirs = array();
+    $zipPluginDirs = array();
+    foreach (glob(WP_CONTENT_DIR.'/plugins/*', GLOB_ONLYDIR) as $pluginDir) {
+        $baseName = basename($pluginDir);
+        if ($baseName == 'wpwire') {
+            continue;
+        }
+        $pluginDirs[] = $baseName;
+        if (isset($_GET["plugin-$baseName"])) {
+            $zipPluginDirs[] = $pluginDir;
+        }
+    }
     if ($genSql) {
         wpwire_gen_sql();
     }
@@ -348,6 +359,10 @@ function wpwire_tool_page() {
     if ($zipPlugins) {
         wpwire_zip_plugins($zip);
     }
+    // Plugin dirs
+    foreach ($zipPluginDirs as $pluginDir) {
+        $zip->addDir($pluginDir, WP_CONTENT_DIR);
+    }
     $zip->close();
     if ($genSql) {
         unlink($tempDir.'/export.sql');
@@ -360,13 +375,21 @@ function wpwire_tool_page() {
     <label for="gen_sql">Generate sql</label><br>
     <!-- Zip uploads -->
     <input type="checkbox" id="zip_uploads" name="zip_uploads" value="1" <?php if ($zipUploads) { echo "checked"; }?>>
-    <label for="zip_uploads">Zip uploads</label><br>
+    <label for="zip_uploads">Uploads</label><br>
     <!-- Zip themes -->
     <input type="checkbox" id="zip_themes" name="zip_themes" value="1" <?php if ($zipThemes) { echo "checked"; }?>>
-    <label for="zip_themes">Zip themes</label><br>
+    <label for="zip_themes">Active theme</label><br>
     <!-- Zip plugins -->
     <input type="checkbox" id="zip_plugins" name="zip_plugins" value="1" <?php if ($zipPlugins) { echo "checked"; }?>>
-    <label for="zip_plugins">Zip themes</label><br>
+    <label for="zip_plugins">Active plugins</label><br>
+    <!-- List plugin directories -->
+    <h2>Plugin directories</h2>
+    <?php foreach ($pluginDirs as $pluginDir): ?>
+        <input type="checkbox"
+            id="plugin-<?php echo $pluginDir?>"
+            name="plugin-<?php echo $pluginDir?>" value="1" <?php if (isset($_GET["plugin-$pluginDir"])) { echo "checked"; }?>>
+        <label for="plugin-<?php echo $pluginDir?>"><?php echo $pluginDir;?></label><br>
+    <?php endforeach;?>
     <input type="submit" value="Export">
     </form>
     <?php
