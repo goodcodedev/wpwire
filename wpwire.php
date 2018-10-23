@@ -163,6 +163,8 @@ function wpwire_get_db_meta() {
     return $meta;
 }
 
+require_once __DIR__.'/class.wpwire-replace-unserialized.php';
+
 function wpwire_gen_sql() {
     global $wpdb;
     $meta = wpwire_get_db_meta();
@@ -243,7 +245,25 @@ function wpwire_gen_sql() {
                         $sql .= (int) $record[$i];
                         break;
                         case 's':
-                        $sql .= "'".esc_sql(str_replace($site_url, $transfer_url, $record[$i]))."'";
+                        // Text values might be serialized php values.
+                        // Site url's that needs to be replaced might be contained in those,
+                        // and a simple replace will mess with the encoding.
+                        // So we attempt to treat all text values as serialized values,
+                        // which will probably mess up rarely.
+                        // TODO: Switch to safe php implementation.
+                        if (is_serialized($record[$i])) {
+                            $unserialized = @unserialize($record[$i]);
+                            if ($unserialized === false) {
+                                $sql .= "'".esc_sql(str_replace($site_url, $transfer_url, $record[$i]))."'";
+                            } else {
+                                // We have unserialized
+                                $replacer = new Wpwire_Replace_Unserialized($site_url, $transfer_url);
+                                $replaced = $replacer->poly($unserialized);
+                                $sql .= "'".esc_sql(serialize($replaced))."'";
+                            }
+                        } else {
+                            $sql .= "'".esc_sql(str_replace($site_url, $transfer_url, $record[$i]))."'";
+                        }
                         break;
                         case 'f':
                         $sql .= (float) $record[$i];
