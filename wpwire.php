@@ -111,9 +111,13 @@ function wpwire_get_db_meta() {
         foreach ($colsRes as $col) {
             $colMeta = wpwire_parse_field_type($col->Type);
             $colMeta['null'] = ($col->Null != 'NO');
-            if ($col->Default === '') {
+            $colMeta['default_sql'] = $col->Default;
+            if ($col->Default === null) {
+                // feels like this could be brittle,
+                // depending here on this being separated from
+                // empty string
                 $colMeta['default'] = false;
-            } elseif ($col->Default === null) {
+            } elseif ($col->Default == 'null') {
                 $colMeta['default'] = null;
             } else {
                 switch ($colMeta['quote']) {
@@ -131,8 +135,29 @@ function wpwire_get_db_meta() {
             $colMeta['pri'] = ($col->Key == 'PRI');
             $colMeta['uni'] = ($col->Key == 'UNI');
             $colMeta['inc'] = ($col->Extra == 'auto_increment');
+            // todo: Figure out "Extra" format, possibly space separated
+            $colMeta['default_expr'] = ($col->Extra == 'DEFAULT_GENERATED');
             $tableMeta['cols'][$col->Field] = $colMeta;
         }
+        // Keys
+        $keysRes = $wpdb->get_results("SHOW INDEX FROM `$tableName`");
+        $primaryKeys = array();
+        $keys = array();
+        foreach ($keysRes as $key) {
+            if ($key->Key_name == 'PRIMARY') {
+                $primaryKeys[] = $key->Column_name;
+            } else {
+                if (!isset($keys[$key->Key_name])) {
+                    $keys[$key->Key_name] = array(
+                        'unique' => ($key->Non_unique != '1'),
+                        'cols' => array()
+                    );
+                }
+                $keys[$key->Key_name]['cols'][] = $key->Column_name;
+            }
+        }
+        $tableMeta['primary'] = $primaryKeys;
+        $tableMeta['keys'] = $keys;
         $meta[$tableName] = $tableMeta;
     }
     return $meta;
@@ -155,18 +180,39 @@ function wpwire_gen_sql() {
                 $fieldSql .= ' not null';
             }
             if ($colMeta['default'] !== false) {
-
-            }
-            if ($colMeta['pri']) {
-                $fieldSql .= ' primary key';
+                $fieldSql .= ' default ';
+                if ($colMeta['default'] === null) {
+                    $fieldSql .= 'null';
+                } elseif ($colMeta['default_expr']) {
+                    $fieldSql .= $colMeta['default_sql'];
+                } else {
+                    switch ($colMeta['quote']) {
+                        case 'd':
+                        case 'f':
+                        $fieldSql .= $colMeta['default_sql'];
+                        break;
+                        case 's':
+                        $fieldSql .= "'".esc_sql($colMeta['default_sql'])."'";
+                        break;
+                    }
+                }
             }
             if ($colMeta['inc']) {
                 $fieldSql .= ' auto_increment';
             }
             $fieldsSql[] = $fieldSql;
         }
+        // Add keys
+        if (count($tableMeta['primary']) > 0) {
+            $fieldsSql[] = 'PRIMARY KEY ('.implode(',', $tableMeta['primary']).')';
+        }
+        foreach ($tableMeta['keys'] as $keyName => $key) {
+            $keySql = ($key['unique']) ? "UNIQUE KEY " : "KEY ";
+            $keySql .= $keyName.' ('.implode(',', $key['cols']).')';
+            $fieldsSql[] = $keySql;
+        }
         $sql .= implode(",\n  ", $fieldsSql);
-        $sql .= "\n);\n\n";
+        $sql .= "\n) DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci;\n\n";
     }
     // Insert data statements
     foreach ($meta as $tableName => $tableMeta) {
@@ -178,11 +224,11 @@ function wpwire_gen_sql() {
             $q[] = $colMeta['quote'];
             $n++;
         }
-        $sql .= "INSERT INTO `$tableName` (\n  ";
-        $sql .= implode(",\n  ", $select->cols);
-        $sql .= "\n) values\n";
         $records = $wpdb->get_results($select->toSql(), ARRAY_N);
         if (count($records) > 0) {
+            $sql .= "INSERT INTO `$tableName` (\n  ";
+            $sql .= implode(",\n  ", $select->cols);
+            $sql .= "\n) values\n";
             $first = true;
             foreach ($records as $record) {
                 if ($first) {
@@ -238,6 +284,7 @@ function wpwire_download_export() {
     header("Content-type: application/zip");
     header("Content-Disposition:attachment; filename=export.zip");
     header("Content-Type: application/force-download");
+    header("Content-Length: ".filesize($zipFile));
     readfile($zipFile);
     unlink($zipFile);
     exit();
@@ -254,7 +301,14 @@ function wpwire_init_download_action() {
 add_action('init', 'wpwire_init_download_action');
 
 function wpwire_tool_page() {
-    wpwire_gen_sql();
+    $genSql = isset($_GET['gen_sql']);
+    $zipUploads = isset($_GET['zip_uploads']);
+    $zipThemes = isset($_GET['zip_themes']);
+    $zipPlugins = isset($_GET['zip_plugins']);
+
+    if ($genSql) {
+        wpwire_gen_sql();
+    }
     $tempDir = wpwire_get_temp_dir();
     $zipFile = $tempDir.'/export.zip';
     if (is_file($zipFile)) {
@@ -262,12 +316,40 @@ function wpwire_tool_page() {
     }
     $zip = Wpwire_Zip::create();
     $zip->open($zipFile);
-    $zip->addFile($tempDir.'/export.sql', $tempDir);
-    wpwire_zip_uploads($zip);
-    wpwire_zip_theme($zip);
-    wpwire_zip_plugins($zip);
+    if ($genSql) {
+        $zip->addFile($tempDir.'/export.sql', $tempDir);
+    }
+    if ($zipUploads) {
+        wpwire_zip_uploads($zip);
+    }
+    if ($zipThemes) {
+        wpwire_zip_theme($zip);
+    }
+    if ($zipPlugins) {
+        wpwire_zip_plugins($zip);
+    }
     $zip->close();
-    unlink($tempDir.'/export.sql');
+    if ($genSql) {
+        unlink($tempDir.'/export.sql');
+    }
+    ?>
+    <form method="get" action="<?php echo esc_url(admin_url('tools.php'));?>">
+    <input type="hidden" name="page" value="wpwire">
+    <!-- Generate sql -->
+    <input type="checkbox" id="gen_sql" name="gen_sql" value="1" <?php if ($genSql) { echo "checked"; }?>>
+    <label for="gen_sql">Generate sql</label><br>
+    <!-- Zip uploads -->
+    <input type="checkbox" id="zip_uploads" name="zip_uploads" value="1" <?php if ($zipUploads) { echo "checked"; }?>>
+    <label for="zip_uploads">Zip uploads</label><br>
+    <!-- Zip themes -->
+    <input type="checkbox" id="zip_themes" name="zip_themes" value="1" <?php if ($zipThemes) { echo "checked"; }?>>
+    <label for="zip_themes">Zip themes</label><br>
+    <!-- Zip plugins -->
+    <input type="checkbox" id="zip_plugins" name="zip_plugins" value="1" <?php if ($zipPlugins) { echo "checked"; }?>>
+    <label for="zip_plugins">Zip themes</label><br>
+    <input type="submit" value="Export">
+    </form>
+    <?php
     echo "Export completed<br>";
     echo '<a href="'.get_site_url().'/wp-admin/?___wpwire_download=1">Download</a>';
 }
